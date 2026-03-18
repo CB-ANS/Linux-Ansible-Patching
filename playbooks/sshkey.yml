@@ -1,0 +1,76 @@
+---
+- name: Ensure ansible has NOPASSWD sudo and install AWX SSH public key
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars:
+    ansible_user_name: ansible
+
+  tasks:
+    - name: Ensure awx_public_key was provided (via Job Template Extra Vars / Survey)
+      ansible.builtin.assert:
+        that:
+          - awx_public_key is defined
+          - awx_public_key is string
+          - awx_public_key | length > 80
+          - awx_public_key.startswith('ssh-')
+        fail_msg: >
+          Provide awx_public_key in the AWX Job Template (Extra Vars or Survey),
+          e.g. awx_public_key: "ssh-ed25519 AAAA... comment"
+
+    # -------------------------------------------------------------------------
+    # SUDOERS: enforce NOPASSWD for ansible (idempotent + visudo-validated)
+    # -------------------------------------------------------------------------
+    - name: Ensure sudoers.d directory exists
+      ansible.builtin.file:
+        path: /etc/sudoers.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Ensure ansible has passwordless sudo via sudoers drop-in
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/{{ ansible_user_name }}"
+        owner: root
+        group: root
+        mode: "0440"
+        validate: "/usr/sbin/visudo -cf %s"
+        content: |
+          # Managed by AWX/Ansible - automation sudo policy for {{ ansible_user_name }}
+          {{ ansible_user_name }} ALL=(ALL) NOPASSWD:ALL
+          Defaults:{{ ansible_user_name }} !requiretty, timestamp_timeout=0
+
+    # Optional: quick safety check (won't prompt; proves NOPASSWD works)
+    - name: Verify sudo works without password for ansible user
+      ansible.builtin.command: "sudo -n true"
+      become: true
+      become_user: "{{ ansible_user_name }}"
+      changed_when: false
+
+    # -------------------------------------------------------------------------
+    # SSH KEY: add AWX public key to /home/ansible/.ssh/authorized_keys
+    # -------------------------------------------------------------------------
+    - name: Ensure .ssh directory exists for ansible user
+      ansible.builtin.file:
+        path: "/home/{{ ansible_user_name }}/.ssh"
+        state: directory
+        owner: "{{ ansible_user_name }}"
+        group: "{{ ansible_user_name }}"
+        mode: "0700"
+
+    - name: Add AWX public key to ansible user's authorized_keys
+      ansible.posix.authorized_key:
+        user: "{{ ansible_user_name }}"
+        key: "{{ awx_public_key }}"
+        state: present
+        manage_dir: false
+
+    - name: Ensure authorized_keys permissions are sane
+      ansible.builtin.file:
+        path: "/home/{{ ansible_user_name }}/.ssh/authorized_keys"
+        state: file
+        owner: "{{ ansible_user_name }}"
+        group: "{{ ansible_user_name }}"
+        mode: "0600"

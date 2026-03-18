@@ -1,0 +1,12 @@
+---
+- name: Test SSH key login
+  hosts: all
+  gather_facts: false
+  become: false
+
+  tasks:
+    - name: Confirm we connected successfully
+      ansible.builtin.command: whoami
+
+    - debug:
+        var: result.stdout

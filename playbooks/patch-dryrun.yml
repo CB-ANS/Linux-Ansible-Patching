@@ -1,0 +1,48 @@
+---
+- name: Dry run – list available updates only
+  hosts: all
+  gather_facts: yes
+  become: yes
+
+  pre_tasks:
+    - name: Show OS information
+      ansible.builtin.debug:
+        msg: "Dry-run on {{ inventory_hostname }} - {{ ansible_facts.os_family }} {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
+
+  tasks:
+    # ------------------------------
+    # Debian / Ubuntu
+    # ------------------------------
+    - name: List available updates (Debian/Ubuntu)
+      ansible.builtin.command: apt list --upgradable
+      register: deb_all_updates
+      changed_when: false
+      failed_when: false
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Show available updates (Debian/Ubuntu)
+      ansible.builtin.debug:
+        msg: |
+          Host: {{ inventory_hostname }}
+          Available updates (Debian/Ubuntu):
+          {{ deb_all_updates.stdout | default('No upgradable packages') }}
+      when: ansible_facts.os_family == "Debian"
+
+    # ------------------------------
+    # RHEL / CentOS / Alma / Rocky
+    # ------------------------------
+    - name: List available updates (RHEL family)
+      ansible.builtin.command: dnf -q check-update
+      register: rhel_all_updates
+      changed_when: false
+      # dnf/yum: 0 = no updates, 100 = updates available
+      failed_when: rhel_all_updates.rc not in [0, 100]
+      when: ansible_facts.os_family == "RedHat"
+
+    - name: Show available updates (RHEL family)
+      ansible.builtin.debug:
+        msg: |
+          Host: {{ inventory_hostname }}
+          Available updates (RHEL family), rc={{ rhel_all_updates.rc }}:
+          {{ rhel_all_updates.stdout | default('No upgradable packages') }}
+      when: ansible_facts.os_family == "RedHat"

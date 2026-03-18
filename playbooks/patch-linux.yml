@@ -1,0 +1,199 @@
+---
+- name: Patch mixed Linux estate and reboot if required
+  hosts: all
+  serial: 5
+  gather_facts: yes
+  become: yes
+
+  vars:
+    reboot_timeout: 1800
+    check_redhat_reboot: true
+
+  pre_tasks:
+    - name: Show hosts targeted by this run
+      ansible.builtin.debug:
+        msg: "Hosts in this play: {{ ansible_play_hosts }}"
+      run_once: true
+
+    - name: Show OS information
+      ansible.builtin.debug:
+        msg: "Patching {{ inventory_hostname }} - {{ ansible_facts.os_family }} {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
+
+  tasks:
+    # ------------------------------
+    # Debian / Ubuntu
+    # ------------------------------
+    - name: Update APT cache
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Upgrade packages (Debian/Ubuntu – no dist-upgrade)
+      ansible.builtin.apt:
+        upgrade: yes        # normal upgrades of installed packages only
+        autoremove: yes     # clean up unused deps (incl. old kernels where applicable)
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Clean APT cache
+      ansible.builtin.command: apt-get clean
+      changed_when: false
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Check if reboot is required (Debian/Ubuntu)
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: deb_reboot
+      when: ansible_facts.os_family == "Debian"
+
+    # ------------------------------
+    # RHEL / CentOS / Alma / Rocky
+    # ------------------------------
+
+    # Make sure dnf only keeps 2 kernel versions going forward
+    - name: Ensure only 2 kernels are kept (dnf installonly_limit)
+      ansible.builtin.lineinfile:
+        path: /etc/dnf/dnf.conf
+        regexp: '^installonly_limit='
+        line: 'installonly_limit=2'
+        insertafter: '^\[main\]'
+      when: ansible_facts.os_family == "RedHat"
+
+    # Free space on /boot BEFORE upgrading so new kernel + grub can install
+    - name: Remove old kernels before upgrade (respecting installonly_limit)
+      ansible.builtin.command: dnf -y remove --oldinstallonly
+      changed_when: false
+      failed_when: false           # safe if nothing to remove or dnf is noisy
+      when: ansible_facts.os_family == "RedHat"
+
+    - name: Upgrade packages (RHEL family – normal updates including kernels)
+      ansible.builtin.package:
+        name: '*'
+        state: latest
+      when: ansible_facts.os_family == "RedHat"
+
+    - name: Clean DNF cache
+      ansible.builtin.command: dnf clean all
+      changed_when: false
+      when: ansible_facts.os_family == "RedHat"
+
+    - name: Autoremove unused packages (first pass, RHEL family)
+      ansible.builtin.command: dnf -y autoremove
+      changed_when: false
+      failed_when: false
+      when: ansible_facts.os_family == "RedHat"
+
+    # Extra safety: after the upgrade, enforce the kernel limit again
+    - name: Remove old kernels after upgrade (respecting installonly_limit)
+      ansible.builtin.command: dnf -y remove --oldinstallonly
+      changed_when: false
+      failed_when: false
+      when: ansible_facts.os_family == "RedHat"
+
+    - name: Install yum-utils for reboot check
+      ansible.builtin.package:
+        name: yum-utils
+        state: present
+      register: yum_utils
+      failed_when: false
+      when: ansible_facts.os_family == "RedHat"
+
+    - name: Check if reboot is required (RHEL family)
+      ansible.builtin.command: needs-restarting -r
+      register: rhel_reboot
+      changed_when: false
+      failed_when: false
+      when:
+        - ansible_facts.os_family == "RedHat"
+        - check_redhat_reboot | bool
+
+    # ------------------------------
+    # RHEL rescue images – keep only newest one
+    # ------------------------------
+    - name: Find rescue initramfs images (RHEL family)
+      ansible.builtin.find:
+        paths: /boot
+        patterns: 'initramfs-0-rescue-*.img'
+        file_type: file
+      register: rescue_imgs
+      when: ansible_facts.os_family == "RedHat"
+
+    - name: Initialise rescue_remove as empty list
+      ansible.builtin.set_fact:
+        rescue_remove: []
+      when: ansible_facts.os_family == "RedHat"
+
+    - name: Determine rescue images to remove (keep newest one)
+      ansible.builtin.set_fact:
+        rescue_remove: >-
+          {{
+            (rescue_imgs.files
+             | sort(attribute='mtime', reverse=True)
+             | map(attribute='path')
+             | list)[1:]
+          }}
+      when:
+        - ansible_facts.os_family == "RedHat"
+        - rescue_imgs.files | length > 1
+
+    - name: Remove old rescue initramfs images
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ rescue_remove }}"
+      when:
+        - ansible_facts.os_family == "RedHat"
+        - rescue_remove | length > 0
+
+    - name: Remove corresponding old rescue vmlinuz images
+      ansible.builtin.file:
+        path: "{{ item | regex_replace('initramfs-(0-rescue-.*)\\.img', 'vmlinuz-\\1') }}"
+        state: absent
+      loop: "{{ rescue_remove }}"
+      when:
+        - ansible_facts.os_family == "RedHat"
+        - rescue_remove | length > 0
+
+    # ------------------------------
+    # Set combined reboot flag
+    # ------------------------------
+    - name: Set reboot_required fact
+      ansible.builtin.set_fact:
+        reboot_required: >-
+          {{
+            (
+              ansible_facts.os_family == "Debian"
+              and (deb_reboot.stat.exists | default(false))
+            )
+            or
+            (
+              ansible_facts.os_family == "RedHat"
+              and (rhel_reboot.rc | default(0)) == 1
+            )
+          }}
+
+    # Final tidy-up before reboot on RHEL
+    - name: Final autoremove before reboot (RHEL family)
+      ansible.builtin.command: dnf -y autoremove
+      changed_when: false
+      failed_when: false
+      when:
+        - ansible_facts.os_family == "RedHat"
+        - reboot_required | bool
+
+    - name: Show reboot decision
+      ansible.builtin.debug:
+        msg: "Reboot required: {{ reboot_required | default(false) }}"
+
+    # ------------------------------
+    # Reboot
+    # ------------------------------
+    - name: Reboot if required
+      ansible.builtin.reboot:
+        reboot_timeout: "{{ reboot_timeout }}"
+      when: reboot_required | bool
+
+    - name: Wait for system after reboot
+      ansible.builtin.wait_for_connection:
+        timeout: 600
+      when: reboot_required | bool
