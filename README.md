@@ -17,9 +17,12 @@ It is designed to integrate with automation platforms such as AWX or Semaphore, 
 
 ## Repository Structure
 
-├── playbooks/ 
-├── patch-linux.yml
-├── patch-dryrun.yml
+.
+├── playbooks/
+│ ├── patch-linux.yml
+│ ├── patch-dryrun.yml
+│ ├── sshkey.yml
+│ └── test-ssh.yml
 
 ## Playbooks
 
@@ -28,6 +31,12 @@ It is designed to integrate with automation platforms such as AWX or Semaphore, 
 
 - **patch-dryrun.yml**  
   Simulates patching to identify pending updates without applying them.
+
+- **sshkey.yml**  
+  Manages SSH key deployment for access and automation.
+
+- **test-ssh.yml**  
+  Validates SSH connectivity to target hosts.
 
 This repository is intended to be consumed by AWX.
 
