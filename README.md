@@ -18,11 +18,14 @@ It is designed to integrate with automation platforms such as AWX or Semaphore, 
 ## Repository Structure
 
 
-├── playbooks/
-  │ ├── patch-linux.yml
-  │ ├── patch-dryrun.yml
-  │ ├── sshkey.yml
-  │ └── test-ssh.yml
+```
+.
+└── playbooks/
+    ├── patch-linux.yml
+    ├── patch-dryrun.yml
+    ├── sshkey.yml
+    └── test-ssh.yml
+```
 
 ## Playbooks
 
