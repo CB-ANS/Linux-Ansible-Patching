@@ -53,17 +53,6 @@
             (ansible_facts['os_family'] == "RedHat" and rhel_reboot_required.rc | default(0) == 1)
           }}
 
-    - name: Show patch summary
-      ansible.builtin.debug:
-        msg:
-          - "Host: {{ inventory_hostname }}"
-          - "OS: {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}"
-          - "Kernel: {{ ansible_facts['kernel'] }}"
-          - "Kernel update available: {{ kernel_update_available | default(false) }}"
-          - "Reboot required: {{ reboot_required }}"
-          - "Debian/Ubuntu updates: {{ apt_updates.stdout_lines | default([]) }}"
-          - "RHEL updates: {{ dnf_updates.stdout_lines | default([]) }}"
-    
     - name: Build readable patch summary
       ansible.builtin.set_fact:
         patch_summary: |
