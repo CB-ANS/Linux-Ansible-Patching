@@ -56,14 +56,17 @@
     - name: Build readable patch summary
       ansible.builtin.set_fact:
         patch_summary: |
-          Host: {{ inventory_hostname }}
-          OS: {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}
-          Kernel: {{ ansible_facts['kernel'] }}
-          Kernel update available: {{ kernel_update_available | default(false) }}
-          Reboot required: {{ reboot_required }}
-          Available updates:
+          ✅ **Semaphore Patch Check**
+
+          **Host:** {{ inventory_hostname }}
+          **OS:** {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}
+          **Kernel:** {{ ansible_facts['kernel'] }}
+          **Kernel update available:** {{ kernel_update_available | default(false) }}
+          **Reboot required:** {{ reboot_required }}
+
+          **Available updates:**
           {% for update in apt_updates.stdout_lines | default(dnf_updates.stdout_lines | default([])) %}
-          - {{ update }}
+          • {{ update }}
           {% endfor %}
 
     - name: Send patch summary to Teams
