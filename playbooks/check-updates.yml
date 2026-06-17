@@ -75,8 +75,13 @@
         method: POST
         body_format: json
         body:
-          text: "{{ patch_summary }}"
+        host: "{{ inventory_hostname }}"
+        os: "{{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}"
+        kernel: "{{ ansible_facts['kernel'] }}"
+        kernel_update: "{{ kernel_update_available | default(false) }}"
+        reboot_required: "{{ reboot_required }}"
+        updates: "{{ apt_updates.stdout_lines | default(dnf_updates.stdout_lines | default([])) | join('\n') }}"
         status_code: 202
       delegate_to: localhost
       become: false
-      when: lookup('env', 'teams_webhook_url') | length > 0
+
