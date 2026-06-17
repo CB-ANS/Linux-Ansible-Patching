@@ -66,13 +66,9 @@
           - {{ update }}
           {% endfor %}
 
-    - name: Show readable patch summary
-      ansible.builtin.debug:
-        msg: "{{ patch_summary }}"
-
     - name: Send patch summary to Teams
       ansible.builtin.uri:
-        url: "{{ teams_webhook_url }}"
+        url: "{{ lookup('env', 'teams_webhook_url') }}"
         method: POST
         body_format: json
         body:
@@ -80,4 +76,4 @@
         status_code: 202
       delegate_to: localhost
       become: false
-      when: teams_webhook_url is defined
+      when: lookup('env', 'teams_webhook_url') | length > 0
