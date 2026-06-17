@@ -80,7 +80,7 @@
           kernel: "{{ ansible_facts['kernel'] }}"
           kernel_update: "{{ kernel_update_available | default(false) }}"
           reboot_required: "{{ reboot_required }}"
-          updates: "{{ apt_updates.stdout_lines | default(dnf_updates.stdout_lines | default([])) | join('\n') }}"
+          updates: "• {{ apt_updates.stdout_lines | default(dnf_updates.stdout_lines | default([])) | join('<br>• ') }}"
         status_code: 202
       delegate_to: localhost
       become: false
