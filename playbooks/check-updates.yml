@@ -11,7 +11,7 @@
         apt list --upgradable 2>/dev/null | tail -n +2
       register: apt_updates
       changed_when: false
-      when: ansible_os_family == "Debian"
+      when: ansible_facts['os_family'] == "Debian"
 
     - name: Check available updates on RHEL/Alma/Rocky
       ansible.builtin.shell: |
@@ -19,46 +19,46 @@
       register: dnf_updates
       changed_when: false
       failed_when: false
-      when: ansible_os_family == "RedHat"
+      when: ansible_facts['os_family'] == "RedHat"
 
     - name: Check if reboot is required on Debian/Ubuntu
       ansible.builtin.stat:
         path: /var/run/reboot-required
       register: debian_reboot_required
-      when: ansible_os_family == "Debian"
+      when: ansible_facts['os_family'] == "Debian"
 
     - name: Check if reboot is required on RHEL/Alma/Rocky
       ansible.builtin.command: needs-restarting -r
       register: rhel_reboot_required
       changed_when: false
       failed_when: false
-      when: ansible_os_family == "RedHat"
+      when: ansible_facts['os_family'] == "RedHat"
 
     - name: Detect kernel updates on Debian/Ubuntu
       ansible.builtin.set_fact:
         kernel_update_available: "{{ apt_updates.stdout is search('linux-image|linux-headers|linux-modules') }}"
-      when: ansible_os_family == "Debian"
+      when: ansible_facts['os_family'] == "Debian"
 
     - name: Detect kernel updates on RHEL/Alma/Rocky
       ansible.builtin.set_fact:
         kernel_update_available: "{{ dnf_updates.stdout is search('kernel|kernel-core|kernel-modules') }}"
-      when: ansible_os_family == "RedHat"
+      when: ansible_facts['os_family'] == "RedHat"
 
     - name: Set reboot required fact
       ansible.builtin.set_fact:
         reboot_required: >-
           {{
-            (ansible_os_family == "Debian" and debian_reboot_required.stat.exists | default(false))
+            (ansible_facts['os_family'] == "Debian" and debian_reboot_required.stat.exists | default(false))
             or
-            (ansible_os_family == "RedHat" and rhel_reboot_required.rc | default(0) == 1)
+            (ansible_facts['os_family'] == "RedHat" and rhel_reboot_required.rc | default(0) == 1)
           }}
 
     - name: Show patch summary
       ansible.builtin.debug:
         msg:
           - "Host: {{ inventory_hostname }}"
-          - "OS: {{ ansible_distribution }} {{ ansible_distribution_version }}"
-          - "Kernel: {{ ansible_kernel }}"
+          - "OS: {{ ansible_facts['distribution'] }} {{ ansible_facts['distribution_version'] }}"
+          - "Kernel: {{ ansible_facts['kernel'] }}"
           - "Kernel update available: {{ kernel_update_available | default(false) }}"
           - "Reboot required: {{ reboot_required }}"
           - "Debian/Ubuntu updates: {{ apt_updates.stdout_lines | default([]) }}"
