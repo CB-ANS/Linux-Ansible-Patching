@@ -5,8 +5,8 @@
   become: true
 
   vars:
-    # Leave false while testing the discovery logic.
-    # Set to true later if an unhealthy cluster should stop an AWX workflow.
+    # Keep false while testing.
+    # Set to true later if an unhealthy cluster should stop the AWX workflow.
     cluster_discovery_fail_on_unhealthy: false
 
   tasks:
@@ -65,6 +65,26 @@
               "reasons": [],
           }
 
+          def clean_node_list(node_text):
+              """
+              Convert:
+                  PEN-DB-01 (1) PEN-DB-02 (2)
+
+              Into:
+                  ["PEN-DB-01", "PEN-DB-02"]
+              """
+              node_text = re.sub(
+                  r"\s+\(\d+\)",
+                  "",
+                  node_text
+              )
+
+              return [
+                  node.strip()
+                  for node in node_text.split()
+                  if node.strip()
+              ]
+
           def parse_bracketed_nodes(label):
               pattern = (
                   rf"^\s*\*\s*{label}:\s*"
@@ -80,11 +100,7 @@
               if not match:
                   return []
 
-              return [
-                  node.strip()
-                  for node in match.group(1).split()
-                  if node.strip()
-              ]
+              return clean_node_list(match.group(1))
 
           # Cluster name
           match = re.search(
@@ -105,12 +121,12 @@
           if match:
               result["current_dc"] = match.group(1)
 
-          # Quorum state
+          # Quorum
           result["quorum"] = (
               "partition with quorum" in status.lower()
           )
 
-          # Number of configured nodes
+          # Configured node count
           match = re.search(
               r"\*\s*(\d+)\s+nodes?\s+configured",
               status,
@@ -122,7 +138,7 @@
                   match.group(1)
               )
 
-          # Number of configured resource instances
+          # Configured resource instance count
           match = re.search(
               r"\*\s*(\d+)\s+resource instances?\s+configured",
               status,
@@ -134,7 +150,7 @@
                   match.group(1)
               )
 
-          # Node state
+          # Node states
           result["online_nodes"] = parse_bracketed_nodes(
               "Online"
           )
@@ -143,7 +159,7 @@
               "OFFLINE"
           )
 
-          # Standby state can be represented separately from Online/OFFLINE.
+          # Standby nodes can appear in different formats.
           standby_patterns = [
               r"^\s*\*\s*Node\s+(\S+):\s*standby",
               r"^\s*\*\s*(\S+):\s*standby",
@@ -160,7 +176,7 @@
                   if node not in result["standby_nodes"]:
                       result["standby_nodes"].append(node)
 
-          # Failed resource action section
+          # Detect failed resource actions.
           result["failed_actions"] = bool(
               re.search(
                   r"^Failed Resource Actions:",
@@ -183,7 +199,7 @@
               re.IGNORECASE
           )
 
-          # Matches resources such as:
+          # Examples:
           #
           # * r_mysql (ocf:heartbeat:mysql): Started PEN-DB-02
           # * ecloud_stonith (stonith:fence_ecloud): Started PEN-DB-01
@@ -195,9 +211,9 @@
               re.IGNORECASE
           )
 
-          # Matches compact clone status lines such as:
+          # Example:
           #
-          # * Started: [ PEN-DB-01 PEN-DB-02 ]
+          # * Started: [ PEN-DB-01 (1) PEN-DB-02 (2) ]
           clone_state_pattern = re.compile(
               r"^\s*\*\s+"
               r"(Started|Promoted|Unpromoted|Stopped|FAILED):"
@@ -282,11 +298,9 @@
 
               if clone_state_match and current_clone:
                   clone_state = clone_state_match.group(1)
-                  clone_nodes = [
-                      node.strip()
-                      for node in clone_state_match.group(2).split()
-                      if node.strip()
-                  ]
+                  clone_nodes = clean_node_list(
+                      clone_state_match.group(2)
+                  )
 
                   for node in clone_nodes:
                       resource = {
@@ -298,8 +312,8 @@
                           "clone": current_clone,
                       }
 
-                      # Clones are recorded but do not determine
-                      # active/passive placement unless handled later.
+                      # Clones are recorded for visibility but do not
+                      # determine active/passive workload placement.
                       result["ignored_resources"].append(resource)
 
                   continue
@@ -343,8 +357,7 @@
 
               result["workload_resources"].append(resource)
 
-              # Only running workload resources count toward
-              # active workload placement.
+              # Only actively running workload resources count.
               if state.lower() not in (
                   "started",
                   "promoted"
@@ -372,15 +385,14 @@
                   if node not in group["nodes"]:
                       group["nodes"].append(node)
 
-          # Ensure all online nodes appear, including nodes with
-          # no active service workloads.
+          # Include online nodes with no active workload resources.
           for node in result["online_nodes"]:
               result["service_distribution"].setdefault(
                   node,
                   0
               )
 
-          # Determine resource-group ownership.
+          # Determine ownership of each resource group.
           for group in result["resource_groups"].values():
               if len(group["nodes"]) == 1:
                   group["owner"] = group["nodes"][0]
@@ -388,7 +400,7 @@
               elif len(group["nodes"]) > 1:
                   group["owner"] = "multiple"
 
-          # Nodes with one or more active service workloads.
+          # Nodes running one or more workload resources.
           result["workload_nodes"] = sorted(
               node
               for node, count
@@ -396,7 +408,7 @@
               if count > 0
           )
 
-          # Online nodes with no active service workload.
+          # Online nodes running no workload resources.
           result["passive_nodes"] = [
               node
               for node in result["online_nodes"]
@@ -406,7 +418,7 @@
               ) == 0
           ]
 
-          # Cluster classification
+          # Cluster classification.
           if len(result["workload_nodes"]) == 1:
               result["cluster_type"] = "active_passive"
               result["active_node"] = (
@@ -421,7 +433,7 @@
                   "no_active_workloads"
               )
 
-          # Health validation
+          # Health checks.
           if not result["cluster_name"]:
               result["reasons"].append(
                   "Cluster name could not be detected"
@@ -572,28 +584,19 @@
     - name: Publish discovery information to AWX workflow
       ansible.builtin.set_stats:
         data:
-          cluster_name: >-
-            {{ cluster_discovery.cluster_name }}
-          cluster_current_dc: >-
-            {{ cluster_discovery.current_dc }}
-          cluster_type: >-
-            {{ cluster_discovery.cluster_type }}
-          cluster_healthy: >-
-            {{ cluster_discovery.healthy }}
-          cluster_active_node: >-
-            {{ cluster_discovery.active_node }}
-          cluster_passive_nodes: >-
-            {{ cluster_discovery.passive_nodes }}
-          cluster_online_nodes: >-
-            {{ cluster_discovery.online_nodes }}
-          cluster_workload_nodes: >-
-            {{ cluster_discovery.workload_nodes }}
+          cluster_name: "{{ cluster_discovery.cluster_name }}"
+          cluster_current_dc: "{{ cluster_discovery.current_dc }}"
+          cluster_type: "{{ cluster_discovery.cluster_type }}"
+          cluster_healthy: "{{ cluster_discovery.healthy }}"
+          cluster_active_node: "{{ cluster_discovery.active_node }}"
+          cluster_passive_nodes: "{{ cluster_discovery.passive_nodes }}"
+          cluster_online_nodes: "{{ cluster_discovery.online_nodes }}"
+          cluster_workload_nodes: "{{ cluster_discovery.workload_nodes }}"
           cluster_service_distribution: >-
             {{ cluster_discovery.service_distribution }}
           cluster_resource_groups: >-
             {{ cluster_discovery.resource_groups }}
-          cluster_discovery: >-
-            {{ cluster_discovery }}
+          cluster_discovery: "{{ cluster_discovery }}"
         per_host: false
       run_once: true
 
