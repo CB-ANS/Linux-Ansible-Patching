@@ -1,0 +1,312 @@
+---
+- name: Discover Pacemaker cluster topology
+  hosts: all
+  gather_facts: false
+  become: true
+
+  vars:
+    cluster_discovery_fail_on_unhealthy: false
+
+  tasks:
+    - name: Select cluster discovery node
+      ansible.builtin.set_fact:
+        cluster_discovery_node: "{{ ansible_play_hosts_all | first }}"
+      run_once: true
+
+    - name: Gather Pacemaker cluster status
+      ansible.builtin.command:
+        cmd: pcs status --full
+      register: pcs_status
+      changed_when: false
+      run_once: true
+      delegate_to: "{{ cluster_discovery_node }}"
+
+    - name: Parse Pacemaker cluster status
+      ansible.builtin.shell:
+        cmd: |
+          python3 <<'PYTHON'
+          import json
+          import re
+          import sys
+
+          status = sys.stdin.read()
+
+          result = {
+              "cluster_name": None,
+              "current_dc": None,
+              "quorum": False,
+              "configured_node_count": 0,
+              "online_nodes": [],
+              "offline_nodes": [],
+              "standby_nodes": [],
+              "workload_resources": [],
+              "ignored_resources": [],
+              "resource_groups": {},
+              "service_distribution": {},
+              "workload_nodes": [],
+              "active_node": None,
+              "passive_nodes": [],
+              "cluster_type": "unknown",
+              "failed_actions": False,
+              "healthy": False,
+              "reasons": [],
+          }
+
+          # Cluster name
+          match = re.search(r"^Cluster name:\s*(\S+)", status, re.MULTILINE)
+          if match:
+              result["cluster_name"] = match.group(1)
+
+          # Current DC
+          match = re.search(r"Current DC:\s*(\S+)", status)
+          if match:
+              result["current_dc"] = match.group(1)
+
+          # Quorum
+          result["quorum"] = "partition with quorum" in status.lower()
+
+          # Configured node count
+          match = re.search(r"\*\s*(\d+)\s+nodes?\s+configured", status)
+          if match:
+              result["configured_node_count"] = int(match.group(1))
+
+          # Node lists
+          def parse_node_list(label):
+              pattern = rf"\*\s*{label}:\s*\[\s*([^\]]*)\]"
+              match = re.search(pattern, status, re.IGNORECASE)
+              if not match:
+                  return []
+              return [
+                  node.strip()
+                  for node in match.group(1).split()
+                  if node.strip()
+              ]
+
+          result["online_nodes"] = parse_node_list("Online")
+          result["offline_nodes"] = parse_node_list("OFFLINE")
+          result["standby_nodes"] = parse_node_list("Node .* standby")
+
+          # Failed actions
+          result["failed_actions"] = bool(
+              re.search(r"Failed Resource Actions:", status, re.IGNORECASE)
+          )
+
+          current_group = None
+
+          group_pattern = re.compile(
+              r"^\s*\*\s*Resource Group:\s*(\S+):\s*$"
+          )
+
+          resource_pattern = re.compile(
+              r"^\s*\*\s+(\S+)\s+"
+              r"\(([^)]+)\):\s+"
+              r"(Started|Promoted|Unpromoted|Stopped|FAILED)"
+              r"(?:\s+(\S+))?\s*$",
+              re.IGNORECASE,
+          )
+
+          ignored_agent_prefixes = (
+              "stonith:",
+              "ocf:pacemaker:ping",
+              "ocf:pacemaker:remote",
+          )
+
+          ignored_name_patterns = (
+              "stonith",
+              "fence",
+              "ping",
+          )
+
+          for raw_line in status.splitlines():
+              line = raw_line.rstrip()
+
+              group_match = group_pattern.match(line)
+              if group_match:
+                  current_group = group_match.group(1)
+                  result["resource_groups"].setdefault(
+                      current_group,
+                      {
+                          "resources": [],
+                          "nodes": [],
+                          "owner": None,
+                      },
+                  )
+                  continue
+
+              # A new top-level section ends the current resource group.
+              if (
+                  re.match(r"^\s*\*\s*(Clone Set|Promotable Clone Set):", line)
+                  or line.startswith("Daemon Status:")
+                  or line.startswith("Node List:")
+              ):
+                  current_group = None
+
+              resource_match = resource_pattern.match(line)
+              if not resource_match:
+                  continue
+
+              resource_id, agent, state, node = resource_match.groups()
+
+              resource = {
+                  "id": resource_id,
+                  "agent": agent,
+                  "state": state,
+                  "node": node,
+                  "group": current_group,
+              }
+
+              is_ignored = (
+                  agent.lower().startswith(ignored_agent_prefixes)
+                  or any(
+                      pattern in resource_id.lower()
+                      for pattern in ignored_name_patterns
+                  )
+              )
+
+              if is_ignored:
+                  result["ignored_resources"].append(resource)
+                  continue
+
+              # Only running workload resources determine active placement.
+              if state.lower() not in ("started", "promoted"):
+                  result["workload_resources"].append(resource)
+                  continue
+
+              if not node:
+                  result["workload_resources"].append(resource)
+                  continue
+
+              result["workload_resources"].append(resource)
+
+              result["service_distribution"].setdefault(node, 0)
+              result["service_distribution"][node] += 1
+
+              if current_group:
+                  group = result["resource_groups"][current_group]
+                  group["resources"].append(resource_id)
+
+                  if node not in group["nodes"]:
+                      group["nodes"].append(node)
+
+          # Ensure every online node appears in distribution.
+          for node in result["online_nodes"]:
+              result["service_distribution"].setdefault(node, 0)
+
+          # Set group ownership.
+          for group_name, group in result["resource_groups"].items():
+              if len(group["nodes"]) == 1:
+                  group["owner"] = group["nodes"][0]
+              elif len(group["nodes"]) > 1:
+                  group["owner"] = "multiple"
+
+          result["workload_nodes"] = sorted(
+              node
+              for node, count in result["service_distribution"].items()
+              if count > 0
+          )
+
+          result["passive_nodes"] = [
+              node
+              for node in result["online_nodes"]
+              if result["service_distribution"].get(node, 0) == 0
+          ]
+
+          # Classify the cluster by workload placement.
+          if len(result["workload_nodes"]) == 1:
+              result["cluster_type"] = "active_passive"
+              result["active_node"] = result["workload_nodes"][0]
+
+          elif len(result["workload_nodes"]) > 1:
+              result["cluster_type"] = "active_active"
+
+          elif len(result["workload_nodes"]) == 0:
+              result["cluster_type"] = "no_active_workloads"
+
+          # Health checks
+          if not result["quorum"]:
+              result["reasons"].append("Cluster does not have quorum")
+
+          if result["offline_nodes"]:
+              result["reasons"].append(
+                  "Offline nodes: " + ", ".join(result["offline_nodes"])
+              )
+
+          if result["failed_actions"]:
+              result["reasons"].append(
+                  "Pacemaker reports failed resource actions"
+              )
+
+          if (
+              result["configured_node_count"]
+              and len(result["online_nodes"])
+              != result["configured_node_count"]
+          ):
+              result["reasons"].append(
+                  "Not all configured nodes are online"
+              )
+
+          if result["cluster_type"] == "no_active_workloads":
+              result["reasons"].append(
+                  "No active workload resources were detected"
+              )
+
+          if result["cluster_type"] == "unknown":
+              result["reasons"].append(
+                  "Unable to determine cluster workload placement"
+              )
+
+          result["healthy"] = len(result["reasons"]) == 0
+
+          print(json.dumps(result))
+          PYTHON
+      args:
+        stdin: "{{ pcs_status.stdout }}"
+        executable: /bin/bash
+      register: parsed_cluster
+      changed_when: false
+      run_once: true
+      delegate_to: "{{ cluster_discovery_node }}"
+
+    - name: Store cluster discovery result
+      ansible.builtin.set_fact:
+        cluster_discovery: "{{ parsed_cluster.stdout | from_json }}"
+      run_once: true
+
+    - name: Display cluster discovery summary
+      ansible.builtin.debug:
+        msg:
+          - "Cluster: {{ cluster_discovery.cluster_name }}"
+          - "Type: {{ cluster_discovery.cluster_type }}"
+          - "Healthy: {{ cluster_discovery.healthy }}"
+          - "Online nodes: {{ cluster_discovery.online_nodes | join(', ') }}"
+          - "Active node: {{ cluster_discovery.active_node | default('N/A', true) }}"
+          - "Passive nodes: {{ cluster_discovery.passive_nodes | join(', ') | default('N/A', true) }}"
+          - "Workload distribution: {{ cluster_discovery.service_distribution }}"
+          - "Resource groups: {{ cluster_discovery.resource_groups }}"
+          - "Health reasons: {{ cluster_discovery.reasons }}"
+      run_once: true
+
+    - name: Publish discovery information to AWX workflow
+      ansible.builtin.set_stats:
+        data:
+          cluster_name: "{{ cluster_discovery.cluster_name }}"
+          cluster_type: "{{ cluster_discovery.cluster_type }}"
+          cluster_healthy: "{{ cluster_discovery.healthy }}"
+          cluster_active_node: "{{ cluster_discovery.active_node }}"
+          cluster_passive_nodes: "{{ cluster_discovery.passive_nodes }}"
+          cluster_online_nodes: "{{ cluster_discovery.online_nodes }}"
+          cluster_service_distribution: "{{ cluster_discovery.service_distribution }}"
+          cluster_resource_groups: "{{ cluster_discovery.resource_groups }}"
+          cluster_discovery: "{{ cluster_discovery }}"
+        per_host: false
+      run_once: true
+
+    - name: Stop workflow when cluster is unhealthy
+      ansible.builtin.assert:
+        that:
+          - cluster_discovery.healthy | bool
+        fail_msg: >-
+          Cluster discovery failed its health checks:
+          {{ cluster_discovery.reasons | join('; ') }}
+      when: cluster_discovery_fail_on_unhealthy | bool
+      run_once: true
